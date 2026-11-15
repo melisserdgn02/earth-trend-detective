@@ -6,15 +6,19 @@
 then open http://localhost:8000
 """
 from __future__ import annotations
+import functools
+import inspect
 import os
 import re
 import threading
 import time
+from collections import OrderedDict
 from pathlib import Path
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, UploadFile, File
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.middleware.gzip import GZipMiddleware
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -25,7 +29,62 @@ from .stats import relations as REL, trend as TR
 ROOT = Path(__file__).resolve().parents[1]
 FRONT = ROOT / "frontend"
 app = FastAPI(title="Trend Globe")
+app.add_middleware(GZipMiddleware, minimum_size=1000)  # the 750 kB country map shrinks to ~200 kB
 PUBLIC_SITE = os.environ.get("EARTH_TREND_PUBLIC", "0") == "1"
+
+# ---------------------------------------------------------------- result cache
+# The statistics are deterministic for a given region + period, so every result is kept in memory.
+# Identical requests that arrive while one is still computing wait for it instead of starting a
+# second computation: on a small server (Render free plan) parallel copies made everything hang.
+_cache: "OrderedDict[tuple, tuple[int, bytes]]" = OrderedDict()
+_inflight: dict = {}
+_cache_lock = threading.Lock()
+CACHE_MAX = int(os.environ.get("RESULT_CACHE_MAX", "300"))
+
+
+def _key_part(v):
+    return v.model_dump_json() if isinstance(v, BaseModel) else v
+
+
+def cached(fn):
+    sig = inspect.signature(fn)
+
+    @functools.wraps(fn)
+    def wrapper(*args, **kwargs):
+        bound = sig.bind(*args, **kwargs)
+        bound.apply_defaults()
+        key = (fn.__name__,) + tuple((k, _key_part(v)) for k, v in bound.arguments.items())
+        while True:
+            with _cache_lock:
+                hit = _cache.get(key)
+                if hit is not None:
+                    _cache.move_to_end(key)
+                    return Response(content=hit[1], status_code=hit[0], media_type="application/json")
+                ev = _inflight.get(key)
+                if ev is None:
+                    ev = _inflight[key] = threading.Event()
+                    break
+            ev.wait(timeout=300)  # someone else is computing this exact result
+            with _cache_lock:
+                if key not in _cache and key not in _inflight:
+                    pass  # the other computation failed: loop and compute it ourselves
+        try:
+            resp = fn(*args, **kwargs)
+            with _cache_lock:
+                _cache[key] = (resp.status_code, bytes(resp.body))
+                while len(_cache) > CACHE_MAX:
+                    _cache.popitem(last=False)
+            return resp
+        finally:
+            with _cache_lock:
+                _inflight.pop(key, None)
+            ev.set()
+    return wrapper
+
+
+def clear_results():
+    with _cache_lock:
+        _cache.clear()
 
 
 def clean(o):
@@ -111,6 +170,7 @@ def region(rid: str):
 
 # ---------------------------------------------------------------- per-variable trends
 @app.get("/api/region/{rid}/summary")
+@cached
 def summary(rid: str, start: int | None = None, end: int | None = None, exclude: str | None = None):
     df, labels, units, pct_ok, info = _load(rid)
     ex = _parse_exclude(exclude)
@@ -144,6 +204,7 @@ def summary(rid: str, start: int | None = None, end: int | None = None, exclude:
 
 
 @app.get("/api/region/{rid}/variable/{vid}")
+@cached
 def variable(rid: str, vid: str, start: int | None = None, end: int | None = None, exclude: str | None = None):
     df, labels, units, pct_ok, info = _load(rid)
     if vid not in df.columns:
@@ -172,6 +233,7 @@ def _label_fn(labels):
 
 
 @app.post("/api/region/{rid}/relations")
+@cached
 def relations(rid: str, req: RelReq):
     df, labels, units, pct_ok, info = _load(rid)
     if req.method not in REL.METHODS or req.mode not in ("anomalies", "detrended"):
@@ -212,6 +274,7 @@ class RegReq(BaseModel):
 
 
 @app.post("/api/region/{rid}/regression")
+@cached
 def regression(rid: str, req: RegReq):
     df, labels, *_ = _load(rid)
     xs = [x for x in req.xs if x in df.columns and x != req.y]
@@ -236,6 +299,7 @@ def regression(rid: str, req: RegReq):
 
 
 @app.get("/api/region/{rid}/scatter")
+@cached
 def scatter(rid: str, x: str, y: str, mode: str = "anomalies", start: int | None = None, end: int | None = None):
     df, labels, units, *_ = _load(rid)
     if x not in df.columns or y not in df.columns:
@@ -245,6 +309,7 @@ def scatter(rid: str, x: str, y: str, mode: str = "anomalies", start: int | None
 
 
 @app.get("/api/region/{rid}/discover")
+@cached
 def discover(rid: str, start: int | None = None, end: int | None = None, exclude: str | None = None):
     df, labels, *_ = _load(rid)
     d = _window(df, start, end, _parse_exclude(exclude))
@@ -269,6 +334,7 @@ class CmpReq(BaseModel):
 
 
 @app.post("/api/compare")
+@cached
 def compare(req: CmpReq):
     da, la, ua, pa, ia = _load(req.a)
     db, *_rest, ib = _load(req.b)
@@ -384,6 +450,7 @@ async def upload(file: UploadFile = File(...)):
         dest.unlink(missing_ok=True)
         raise HTTPException(400, str(e))
     data.clear()
+    clear_results()
     w, s, e, n = g["bbox"] if g["bbox"] else (None,) * 4
     rid = f"g-{w:g}_{s:g}_{e:g}_{n:g}" if g["bbox"] else None
     giovanni_csv.load_all()
@@ -406,7 +473,41 @@ def geo():
 
 @app.get("/health")
 def health():
-    return {"status": "ok"}
+    return {"status": "ok", "warm": _warm["done"], "cached_results": len(_cache)}
+
+
+# ---------------------------------------------------------------- warm-up
+# Precompute the bundled study areas right after start-up, so the demo buttons answer at once
+# even on a slow free server that has just woken up.
+_warm = {"done": False}
+
+
+def _warm_up():
+    try:
+        seen = set()
+        for g in giovanni_csv.load_all():
+            b = g.get("bbox")
+            if not b or g.get("series") is None:
+                continue
+            rid = f"g-{b[0]:g}_{b[1]:g}_{b[2]:g}_{b[3]:g}"
+            if rid in seen:
+                continue
+            seen.add(rid)
+            try:
+                summary(rid=rid)
+                df = data.region_data(rid)[0]
+                for vid in df.columns:
+                    variable(rid=rid, vid=vid)
+            except Exception as e:  # never let warm-up break the site
+                print(f"warm-up {rid}: {type(e).__name__}: {e}")
+    finally:
+        _warm["done"] = True
+
+
+@app.on_event("startup")
+def _start_warm_up():
+    if os.environ.get("WARM_UP", "1") == "1":
+        threading.Thread(target=_warm_up, daemon=True).start()
 
 
 @app.get("/")

@@ -139,6 +139,16 @@ def _overlap(a, b):
     return inter / min((a[2] - a[0]) * (a[3] - a[1]), (b[2] - b[0]) * (b[3] - b[1]))
 
 
+def _iou(a, b):
+    w, s = max(a[0], b[0]), max(a[1], b[1])
+    e, n = min(a[2], b[2]), min(a[3], b[3])
+    if e <= w or n <= s:
+        return 0.0
+    inter = (e - w) * (n - s)
+    union = (a[2] - a[0]) * (a[3] - a[1]) + (b[2] - b[0]) * (b[3] - b[1]) - inter
+    return inter / union
+
+
 def for_region(region: dict) -> list[dict]:
     """Giovanni files whose box matches the region: same box, or box centre inside the region
     and boxes overlapping by at least half of the smaller one."""
@@ -149,6 +159,14 @@ def for_region(region: dict) -> list[dict]:
         b = g["bbox"]
         same = all(abs(x - y) < 0.3 for x, y in zip(b, region["bbox"]))
         cx, cy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
-        if same or (bool(R.inside(region, [cx], [cy])[0]) and _overlap(b, region["bbox"]) >= 0.5):
+        if same:
+            hits.append(g)
+        elif region.get("kind") == "country":
+            # a country shows Giovanni boxes that lie mostly inside it
+            if bool(R.inside(region, [cx], [cy])[0]) and _overlap(b, region["bbox"]) >= 0.5:
+                hits.append(g)
+        elif _iou(b, region["bbox"]) >= 0.5:
+            # boxes must cover nearly the same area, so a small study box never
+            # inherits the series of a much larger box around it (or vice versa)
             hits.append(g)
     return hits

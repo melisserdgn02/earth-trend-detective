@@ -12,14 +12,28 @@ const $$ = (s, el = document) => [...el.querySelectorAll(s)];
 const esc = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
 const slug = (s) => s.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
 const VCOL = { PROVEN: "#4de0bb", SUSPICIOUS: "#f5bb78", "NO TREND": "#889bb5" };
-const FRIENDLY = { PROVEN: "Clear trend", SUSPICIOUS: "Possible trend", "NO TREND": "No clear trend" };
+const FRIENDLY = { PROVEN: "Significant trend", SUSPICIOUS: "Possible trend", "NO TREND": "No significant trend" };
+const VORDER = { PROVEN: 0, SUSPICIOUS: 1, "NO TREND": 2 };
 const friendly = (v) => FRIENDLY[v] || v;
 
 // ---------------------------------------------------------------- utils
+const API_TIMEOUT_MS = 120000;
 async function api(path, opts = {}) {
   const o = { ...opts };
   if (o.json) { o.method = o.method || "POST"; o.headers = { "Content-Type": "application/json" }; o.body = JSON.stringify(o.json); delete o.json; }
-  const r = await fetch(path, o);
+  // Every request gets a timeout; region requests also stop when the user picks another place.
+  const ctl = new AbortController();
+  const timer = setTimeout(() => ctl.abort("timeout"), o.timeout || API_TIMEOUT_MS);
+  const outer = o.signal; delete o.timeout;
+  if (outer) { if (outer.aborted) ctl.abort("cancelled"); else outer.addEventListener("abort", () => ctl.abort("cancelled"), { once: true }); }
+  o.signal = ctl.signal;
+  let r;
+  try { r = await fetch(path, o); }
+  catch (e) {
+    if (ctl.signal.reason === "cancelled") { const c = new Error("cancelled"); c.cancelled = true; throw c; }
+    if (ctl.signal.reason === "timeout") throw new Error("The server took too long to answer. It may be waking up — please try again.");
+    throw new Error("Could not reach the server. Check your connection and try again.");
+  } finally { clearTimeout(timer); }
   let j = null;
   try { j = await r.json(); } catch (e) { /* not json */ }
   if (!r.ok) throw new Error((j && j.detail) || `HTTP ${r.status}`);
@@ -45,6 +59,21 @@ function loadPlotly() {
     });
   }
   return plotlyRequest;
+}
+function loadingHTML(text) {
+  return `<div class="loading" role="status"><span class="spin"></span><span>${esc(text)} <span class="elapsed" data-t0="${Date.now()}"></span></span></div>
+    <p class="muted slow-hint hidden">The free server may be waking up. The first request after a pause can take up to a minute; after that it is fast.</p>`;
+}
+setInterval(() => {
+  for (const el of document.querySelectorAll(".elapsed[data-t0]")) {
+    const sec = Math.round((Date.now() - +el.dataset.t0) / 1000);
+    if (sec >= 3) el.textContent = `(${sec} s)`;
+    const hint = el.closest(".loading")?.nextElementSibling;
+    if (hint && hint.classList.contains("slow-hint")) hint.classList.toggle("hidden", sec < 12);
+  }
+}, 1000);
+function errorHTML(msg) {
+  return `<div class="error-card"><b>Something went wrong</b><p>${esc(msg)}</p><button class="retry" type="button">Try again</button></div>`;
 }
 function toast(msg, err = false, ms = 4200) {
   const t = $("#toast"); t.textContent = msg; t.className = "toast" + (err ? " err" : "");
@@ -218,7 +247,8 @@ function setSidebar(side, open) {
   const trigger = $(left ? "#toggle-notes" : "#toggle-overview");
   panel.classList.toggle("hidden", !open);
   trigger.setAttribute("aria-expanded", open);
-  if (open && !left) requestAnimationFrame(() => $$(".tab:not(.hidden) .js-plotly-plot").forEach(plot => Plotly.Plots.resize(plot)));
+  trigger.classList.toggle("invisible", open);
+  resizePlots();
 }
 
 function renderCountryProfile(region) {
@@ -240,6 +270,8 @@ function renderCountryProfile(region) {
 }
 
 async function selectRegion(r) {
+  if (S.regionCtl) S.regionCtl.abort();
+  S.regionCtl = new AbortController();
   const request = ++S.regionRequest;
   ++S.summaryRequest;
   ++S.detailRequest;
@@ -248,12 +280,12 @@ async function selectRegion(r) {
   setSidebar("overview", true);
   switchTab("overview");
   $("#welcome").classList.add("hidden");
-  $("#tab-overview").innerHTML = '<p class="muted" role="status">Opening study area…</p>';
+  $("#tab-overview").innerHTML = loadingHTML("Opening " + r.name + "…");
   $("#search").value = r.name;
   S.boxFeature = r.kind !== "country" && r.bbox ? boxFeature(r.bbox, r.name) : null;
   refreshGlobe();
   try {
-    const info = await api("/api/region/" + encodeURIComponent(r.id));
+    const info = await api("/api/region/" + encodeURIComponent(r.id), { signal: S.regionCtl.signal });
     if (request !== S.regionRequest) return;
     S.region = { ...r, ...info };
     if (r.label) S.region.name = r.label;
@@ -261,7 +293,9 @@ async function selectRegion(r) {
     refreshGlobe(); flyTo(info.bbox);
     globe.pointsData(r.id.startsWith("g-") ? [] : info.points.map(([lat, lng]) => ({ lat, lng })));
   } catch (e) {
-    if (request === S.regionRequest) $("#tab-overview").textContent = e.message;
+    if (e.cancelled || request !== S.regionRequest) return;
+    $("#tab-overview").innerHTML = errorHTML(e.message);
+    $("#tab-overview .retry").onclick = () => selectRegion(r);
     return;
   }
   await loadSummary();
@@ -271,13 +305,14 @@ async function loadSummary() {
   const rid = S.region.id;
   const request = ++S.summaryRequest;
   ++S.detailRequest;
-  $("#notes").innerHTML = `<h2>Case notes</h2><div class="region-name">${esc(S.region.name)}</div><div class="loading"><div class="spin"></div>Fetching NASA data and running the tests… (first time per region can take ~10–30 s)</div>`;
-  $("#tab-overview").innerHTML = `<div class="overview-intro"><span class="mini-tag">GETTING REAL NASA DATA</span><h2>${esc(S.region.name)}</h2><p class="loading"><span class="spin"></span> Loading measurements and checking for trends…</p><p class="muted">The first request can take a little longer.</p></div>`;
+  $("#notes").innerHTML = `<div class="region-name">${esc(S.region.name)}</div>${loadingHTML("Fetching NASA data and running the tests…")}`;
+  $("#tab-overview").innerHTML = `<div class="overview-intro"><span class="mini-tag">GETTING REAL NASA DATA</span><h2>${esc(S.region.name)}</h2>${loadingHTML("Loading measurements and testing every variable for a trend…")}</div>`;
   $("#tab-vars").innerHTML = `<div class="placeholder"><div class="loading" style="justify-content:center"><div class="spin"></div>Investigating ${esc(S.region.name)}…</div></div>`;
   $("#tab-rel").innerHTML = $("#tab-cmp").innerHTML = `<div class="placeholder">Loading ${esc(S.region.name)}…</div>`;
   try {
-    const sm = await api(`/api/region/${encodeURIComponent(rid)}/summary${periodQuery()}`);
+    const sm = await api(`/api/region/${encodeURIComponent(rid)}/summary${periodQuery()}`, { signal: S.regionCtl?.signal });
     if (request !== S.summaryRequest || S.region?.id !== rid) return;
+    sm.variables.forEach((v) => { v.unit = prettyUnit(v.unit); });
     S.summary = sm;
     if (S.region.name !== sm.region.name) sm.region.name = S.region.name;
     if (!S.relVars.size || [...S.relVars].some((v) => !sm.variables.find((x) => x.id === v))) {
@@ -286,10 +321,11 @@ async function loadSummary() {
     renderNotes(); renderOverview(); renderVars(); renderRel(); renderCmp();
     $("#demo-banner").classList.toggle("hidden", !(sm.info && sm.info.synthetic));
   } catch (e) {
-    if (request !== S.summaryRequest) return;
-    $("#notes").innerHTML = `<h2>Case notes</h2><div class="region-name">${esc(S.region.name)}</div><p class="caveat">${esc(e.message)}</p>`;
+    if (e.cancelled || request !== S.summaryRequest) return;
+    $("#notes").innerHTML = `<div class="region-name">${esc(S.region.name)}</div><p class="caveat">${esc(e.message)}</p>`;
     $("#tab-vars").innerHTML = `<div class="placeholder">${esc(e.message)}</div>`;
-    $("#tab-overview").innerHTML = `<div class="overview-intro"><h2>Data could not be loaded</h2><p>${esc(e.message)}</p><p>You can try another place or upload a Giovanni CSV file instead.</p></div>`;
+    $("#tab-overview").innerHTML = `<div class="overview-intro"><h2>Data could not be loaded</h2>${errorHTML(e.message)}<p class="muted">You can also try another place.</p></div>`;
+    $("#tab-overview .retry").onclick = () => loadSummary();
   }
 }
 function defaultRelVars(sm) {
@@ -313,6 +349,42 @@ function trendMeaning(s, v) {
   if (s.verdict === "SUSPICIOUS") return `The numbers suggest a ${s.sen_dec >= 0 ? "rise" : "fall"}, but there is not enough evidence to be confident yet.`;
   return "The numbers go up and down, but we cannot confidently say there is a steady rise or fall. This does not prove there was no change.";
 }
+function badgeHTML(st) {
+  const v = st && st.ok ? st.verdict : null;
+  if (!v) return `<span class="badge NA">Too little data</span>`;
+  return `<span class="badge ${v === "NO TREND" ? "NO" : v}">${esc(friendly(v))}</span>`;
+}
+function prettyUnit(u) {
+  if (!u) return u;
+  return String(u).replace(/\bkg m-2 s-1\b/g, "kg/m²/s").replace(/\bkg m-2\b/g, "kg/m²").replace(/\bW m-2\b/g, "W/m²")
+    .replace(/\bm-2\b/g, "m⁻²").replace(/\bs-1\b/g, "s⁻¹").replace(/\bm2\b/g, "m²").replace(/\bm3\b/g, "m³");
+}
+function unitSuffix(u) { return u ? " " + u : ""; }
+function rowNumbers(v) {
+  const st = v.stats;
+  if (!st || !st.ok) return `<span class="ov-nums"><b>–</b></span>`;
+  const dir = st.sen_dec > 0 ? "up" : st.sen_dec < 0 ? "down" : "";
+  const pct = isFinite(st.pct) && st.pct !== null ? `<small>${fsig(st.pct, 2)} % since ${esc(st.start.slice(0, 4))}</small>` : `<small>${fsig(st.total)}${esc(unitSuffix(v.unit))} since ${esc(st.start.slice(0, 4))}</small>`;
+  return `<span class="ov-nums"><b class="${dir}">${fsig(st.sen_dec)}${esc(unitSuffix(v.unit))}<i>/decade</i></b>${pct}</span>`;
+}
+function sortedVariables(sm) {
+  const rank = (v) => (v.stats && v.stats.ok ? VORDER[v.stats.verdict] ?? 3 : 4);
+  return [...sm.variables].sort((a, b) => rank(a) - rank(b) || Math.abs(b.stats?.snr || 0) - Math.abs(a.stats?.snr || 0));
+}
+function choiceHTML(v, attr = "data-id") {
+  return `<button class="ov-choice" ${attr}="${esc(v.id)}" type="button" aria-expanded="false" aria-controls="overview-detail">
+    <span class="ov-name">${esc(v.label)}<small>${esc(v.category || "Measurement")}</small></span>
+    ${rowNumbers(v)}${badgeHTML(v.stats)}</button>`;
+}
+function summaryStrip(sm) {
+  const n = { PROVEN: 0, SUSPICIOUS: 0, "NO TREND": 0 };
+  sm.variables.forEach((v) => { if (v.stats?.ok && v.stats.verdict in n) n[v.stats.verdict]++; });
+  return `<div class="ov-summary">
+    <div class="PROVEN"><b>${n.PROVEN}</b><span>significant trend${n.PROVEN === 1 ? "" : "s"}</span></div>
+    <div class="SUSPICIOUS"><b>${n.SUSPICIOUS}</b><span>possible</span></div>
+    <div class="NO"><b>${n["NO TREND"]}</b><span>no significant trend</span></div></div>
+    <p class="ov-meta">${esc(sm.period)} · ${esc(sm.info?.source_type || "NASA")} · ${sm.variables.length} variables tested · significance after correcting for autocorrelation and for testing many variables (FDR)</p>`;
+}
 async function chooseOverviewVar(vid) {
   if (!S.summary || !S.region) return;
   const v = S.summary.variables.find(x => x.id === vid);
@@ -328,20 +400,29 @@ async function chooseOverviewVar(vid) {
   const box = $("#overview-detail");
   box.classList.toggle("hidden", !expanded);
   if (!expanded) return;
-  box.innerHTML = `<div class="loading"><span class="spin"></span>Loading your graph…</div>`;
+  box.innerHTML = loadingHTML("Loading the graph and all tests…");
   try {
     const [data] = await Promise.all([
-      api(`/api/region/${encodeURIComponent(S.region.id)}/variable/${encodeURIComponent(vid)}${periodQuery()}`),
+      api(`/api/region/${encodeURIComponent(S.region.id)}/variable/${encodeURIComponent(vid)}${periodQuery()}`, { signal: S.regionCtl?.signal }),
       loadPlotly(),
     ]);
     if (request !== S.detailRequest) return;
     const st = v.stats;
     const analysis = data.stats;
     const dir = st.sen_dec >= 0 ? "rising" : "falling";
-    box.innerHTML = `<div class="ov-result-head"><div><div class="eyebrow">EXPLORING ${esc(v.category || "EARTH SCIENCE")}</div>
-      <h3>${esc(v.label)}</h3><p>${esc(v.definition)}</p></div>${stampHTML(st.verdict, true)}</div>
-      <div class="ov-metrics"><div><small>Average change every 10 years</small><strong>${st.ok ? fsig(st.sen_dec) : "–"} <span>${esc(v.unit)}</span></strong></div>
-      <div><small>Time period</small><strong>${st.ok ? esc(st.start.slice(0,4)) + "–" + esc(st.end.slice(0,4)) : "–"}</strong></div></div>
+    const ci = analysis.ok && analysis.annual && Array.isArray(analysis.annual.sen_ci_dec) ? analysis.annual.sen_ci_dec : null;
+    const pctLine = st.ok && st.pct !== null && isFinite(st.pct) ? `${fsig(st.pct, 2)} %` : "";
+    box.innerHTML = `<div class="ov-result-head"><div><div class="eyebrow">${esc(v.category || "EARTH SCIENCE")}</div>
+      <h3>${esc(v.label)}</h3><p>${esc(v.definition)}</p></div>${badgeHTML(st)}</div>
+      <div class="ov-metrics">
+        <div><small>Trend per decade</small><strong>${st.ok ? fsig(st.sen_dec) : "–"} <span>${esc(v.unit)}</span></strong>
+          <em>${ci ? `95 % range ${fsig(ci[0])} to ${fsig(ci[1])}` : "Sen's slope"}</em></div>
+        <div><small>Total change since ${st.ok ? esc(st.start.slice(0, 4)) : "–"}</small><strong>${st.ok ? fsig(st.total) : "–"} <span>${esc(v.unit)}</span></strong>
+          <em>${pctLine ? pctLine + " of the long-term mean" : `change ÷ year-to-year noise: ${st.ok ? fmt(st.snr, 2) : "–"}`}</em></div>
+        <div class="sig ${st.ok ? (st.verdict === "NO TREND" ? "NO" : st.verdict) : ""}"><small>Is it significant?</small><strong>${st.ok ? esc(friendly(st.verdict)) : "–"}</strong>
+          <em>${st.ok ? `Seasonal Kendall p ${fp(st.seasonal_kendall.p)} · Mann-Kendall p ${fp(st.hamed_rao.p)} · after FDR q ${fp(st.q)}` : ""}</em></div>
+        <div><small>Data period</small><strong>${st.ok ? esc(st.start.slice(0,4)) + "–" + esc(st.end.slice(0,4)) : "–"}</strong>
+          <em>${st.ok ? `${st.n} months` : ""}</em></div></div>
       <div id="overview-chart" class="ov-chart" role="img" aria-label="Time series chart for ${esc(v.label)}"></div>
       <div class="ov-explanation"><span class="mini-tag">SO, WHAT DOES THIS MEAN?</span><p>${esc(trendMeaning(st,v))}</p></div>
       <div class="ov-source"><span>Data: <b>${esc(sourceOf(v))}</b> · ${esc(v.unit || "unitless")}</span><button id="export-csv" class="ghost">Download data (CSV)</button></div>
@@ -354,7 +435,7 @@ async function chooseOverviewVar(vid) {
       await Plotly.newPlot("overview-chart", [
         {x:t, y, type:"scatter", mode:"lines", name:"12-month average change from usual", line:{color:"#51d5c8",width:3}, connectgaps:false},
         {x:t, y:fit, type:"scatter", mode:"lines", name:"Long-term trend", line:{color:"#ffbf86",width:2,dash:"dash"}}
-      ], layout({height:285, margin:{l:56,r:14,t:34,b:40}, xaxis:{gridcolor:"#203651", tickfont:{size:11}}, yaxis:{title:{text:`Change from usual (${v.unit})`,font:{size:11}}, gridcolor:"#203651"}, legend:{orientation:"h",y:1.19}}), PCFG);
+      ], layout({height:320, margin:{l:56,r:14,t:34,b:40}, xaxis:{gridcolor:"#203651", tickfont:{size:11}}, yaxis:{title:{text:`Change from usual${v.unit ? ` (${v.unit})` : ""}`,font:{size:11}}, gridcolor:"#203651"}, legend:{orientation:"h",y:1.19}}), PCFG);
       $("#export-csv").onclick = () => {
         const raw = analysis.chart;
         const rows = [["month","measured_value","change_from_usual","12_month_average_change","trend_line_change"],
@@ -368,18 +449,18 @@ async function chooseOverviewVar(vid) {
       $("#overview-chart").innerHTML = `<div class="placeholder">There are not enough months of data for a reliable graph.</div>`;
       $("#export-csv").disabled = true;
     }
-  } catch(e) { if (request !== S.detailRequest) return; box.innerHTML=`<p class="caveat">${esc(e.message)}</p>`; }
+  } catch(e) {
+    if (e.cancelled || request !== S.detailRequest) return;
+    box.innerHTML = errorHTML(e.message);
+    $(".retry", box).onclick = () => { S.overviewVar = null; chooseOverviewVar(vid); };
+  }
 }
 function renderOverview() {
   const sm = S.summary;
-  const preferred = preferredOverviewVars(sm);
-  const ordered = [...preferred, ...sm.variables.map(v => v.id).filter(id => !preferred.includes(id))];
-  $("#tab-overview").innerHTML = `<p class="overview-label">Choose a measurement to see its trend and graph.</p>
-    <label class="filter-label">Find a variable<input id="overview-search" type="search" placeholder="Temperature, rainfall, clouds…"></label>
-    <div class="ov-picks">${ordered.map(id => {
-      const v = sm.variables.find(item => item.id === id);
-      return `<button class="ov-choice" data-id="${esc(id)}" type="button" aria-expanded="false" aria-controls="overview-detail"><span>${esc(v.label)}</span><small>${esc(v.category || "Measurement")}</small></button>`;
-    }).join("") || '<p class="muted">No measurements available.</p>'}</div>
+  $("#tab-overview").innerHTML = `${summaryStrip(sm)}
+    <div class="ov-toolbar"><p class="overview-label">Click a measurement to see its graph and all tests.</p>
+    <input id="overview-search" type="search" aria-label="Find a variable" placeholder="Find a variable…"></div>
+    <div class="ov-picks">${sortedVariables(sm).map(v => choiceHTML(v)).join("") || '<p class="muted">No measurements available.</p>'}</div>
     <p id="overview-empty" class="muted hidden" role="status">No matching variables.</p>
     <div id="overview-detail" class="overview-detail hidden"></div>`;
   S.overviewVar = null;
@@ -468,8 +549,7 @@ function renderVars() {
       `${v.label} ${v.category} ${v.id}`.toLowerCase().includes(query) &&
       (verdict === "all" || (v.stats.ok && v.stats.verdict === verdict)));
     $("#vars-count").textContent = `${filtered.length} of ${variables.length} variables`;
-    $("#variable-list").innerHTML = filtered.map(v =>
-      `<button type="button" class="ov-choice" data-v="${esc(v.id)}"><span>${esc(v.label)}</span><small>${esc(v.category || "Measurement")}</small></button>`).join("");
+    $("#variable-list").innerHTML = sortedVariables({ variables: filtered }).map(v => choiceHTML(v, "data-v")).join("");
     $$("#variable-list button").forEach(button => button.onclick = () => openDetail(button.dataset.v));
   }
   $("#vars-search").oninput = filterVariables;
@@ -810,12 +890,47 @@ function renderMethod() {
 }
 
 // ---------------------------------------------------------------- tabs, header, boot
+function resizePlots() {
+  if (!window.Plotly) return;
+  requestAnimationFrame(() => $$(".js-plotly-plot").forEach((p) => { if (p.offsetParent) Plotly.Plots.resize(p); }));
+}
 function switchTab(t) {
   $$(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === t));
   $$(".tab").forEach((el) => el.classList.toggle("hidden", el.id !== "tab-" + t));
-  if (t === "rel" || t === "cmp" || t === "vars" || t === "overview") setTimeout(() => $$(".js-plotly-plot").forEach((p) => Plotly.Plots.resize(p)), 50);
+  resizePlots();
+}
+function setupPanelResize() {
+  const panel = $("#overview-panel"), grip = $("#panel-resizer"), wide = $("#panel-wide");
+  const store = { get: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
+                  set: (k, v) => { try { localStorage.setItem(k, v); } catch { /* storage unavailable */ } } };
+  const saved = +store.get("panelWidth");
+  if (saved >= 360) panel.style.setProperty("--panel-w", saved + "px");
+  let startX = 0, startW = 0;
+  const move = (e) => {
+    const w = Math.max(360, Math.min(window.innerWidth * 0.75, startW + (startX - e.clientX)));
+    panel.style.setProperty("--panel-w", w + "px");
+  };
+  const up = () => {
+    grip.classList.remove("drag"); document.body.classList.remove("resizing");
+    window.removeEventListener("pointermove", move); window.removeEventListener("pointerup", up);
+    store.set("panelWidth", Math.round(panel.getBoundingClientRect().width)); resizePlots();
+  };
+  grip.addEventListener("pointerdown", (e) => {
+    panel.classList.remove("wide"); wide.setAttribute("aria-pressed", "false");
+    startX = e.clientX; startW = panel.getBoundingClientRect().width;
+    grip.classList.add("drag"); document.body.classList.add("resizing");
+    window.addEventListener("pointermove", move); window.addEventListener("pointerup", up);
+  });
+  grip.addEventListener("dblclick", () => { panel.style.removeProperty("--panel-w"); store.set("panelWidth", ""); resizePlots(); });
+  wide.onclick = () => {
+    const on = !panel.classList.contains("wide");
+    panel.classList.toggle("wide", on); wide.setAttribute("aria-pressed", on);
+    wide.textContent = on ? "⇥ Narrow" : "⇤ Wider"; resizePlots();
+  };
+  window.addEventListener("resize", () => { clearTimeout(setupPanelResize._t); setupPanelResize._t = setTimeout(resizePlots, 150); });
 }
 async function boot() {
+  setupPanelResize();
   for (const side of ["notes", "overview"]) {
     const trigger = $("#toggle-" + side);
     trigger.onclick = () => setSidebar(side, trigger.getAttribute("aria-expanded") !== "true");
@@ -838,9 +953,13 @@ async function boot() {
   initGlobe(topo, profiles);
   setupSearch($("#search"), $("#search-results"), selectRegion);
   $$(".example").forEach((b) => b.addEventListener("click", async () => {
-    try { const bundled = b.hasAttribute("data-demo") && S.meta.giovanni.some(file => file.bbox?.join(",") === "16,45,23,48.5");
+    try {
+      // Bundled Giovanni boxes open their exact Giovanni series (fast and offline); otherwise search the name.
+      const box = b.dataset.demo;
+      const bundled = box && S.meta.giovanni.some(file => file.bbox?.join(",") === box);
+      const bb = box ? box.split(",").map(Number) : null;
       const selected = bundled
-        ? {id: "g-16_45_23_48.5", name: "Carpathian Basin study box", label: "Carpathian Basin study box", kind: "box"}
+        ? { id: "g-" + bb.join("_"), name: b.dataset.label, label: b.dataset.label, kind: "box", bbox: bb }
         : (await api("/api/search?q=" + encodeURIComponent(b.dataset.region)))[0];
       if (selected) selectRegion(selected); }
     catch(e) { toast(e.message, true); }
