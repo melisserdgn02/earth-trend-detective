@@ -1,0 +1,2 @@
+earth-blue-marble.jpg: NASA Blue Marble imagery (NASA Visible Earth, public domain), copy from the three-globe examples (MIT, Vasco Asturiano), resized.
+earth-topology.jpg: elevation bump map from the same examples.

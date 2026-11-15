@@ -17,6 +17,10 @@ DATA = Path(__file__).resolve().parents[1] / "data"
 PRESETS = {
     "Carpathian Basin (Hungary box)": (16.0, 45.0, 23.0, 48.5),
     "Homokhátság (Great Hungarian Plain)": (19.0, 46.0, 20.5, 47.3),
+    "NW China (Tianshan foothills)": (80.0, 42.0, 88.0, 46.0),
+    "Southern Sweden": (12.0, 57.0, 18.0, 61.0),
+    "Northern Scotland": (-5.5, 56.0, -3.0, 58.3),
+    "Sahel study box (Mali/Niger)": (-5.0, 13.0, 10.0, 16.0),
     "Iberian Peninsula box": (-9.0, 36.0, 3.0, 43.0),
     "Upper Danube basin": (8.0, 46.0, 17.0, 50.0),
     "Po Valley": (7.0, 44.5, 13.0, 46.0),
@@ -32,6 +36,7 @@ PRESETS = {
 }
 
 ALIASES = {
+    "xinjiang": "NW China (Tianshan foothills)", "tianshan": "NW China (Tianshan foothills)",
     "homokhatsag": "Homokhátság (Great Hungarian Plain)", "great hungarian plain": "Homokhátság (Great Hungarian Plain)",
     "hungary's hidden desert": "Homokhátság (Great Hungarian Plain)",
     "usa": "United States of America", "us": "United States of America", "united states": "United States of America",

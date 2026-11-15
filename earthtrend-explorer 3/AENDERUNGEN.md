@@ -39,3 +39,19 @@ python tests/test_api.py → ALL PASS · python tests/test_stats.py → ALL PASS
 2. In Render prüfen, dass der neueste Commit deployed ist (sonst „Manual Deploy → Deploy latest commit“).
 3. Vor der Präsentation die Seite 1–2 min vorher einmal öffnen (Server aufwecken).
    Dauerhaft wach: kostenloser Ping-Dienst (z. B. UptimeRobot) alle 10 min auf /health, oder Render „Starter“-Plan.
+
+---
+
+# Änderungen Teil 2: Erdkugel wie bei NASA, Trend-Markierungen, Vergleichsregionen
+
+- Kugel mit echten NASA-Satellitenbildern (Blue Marble) und Relief statt einfarbiger Länder;
+  Ländergrenzen als feine Linien, Land beim Überfahren leicht hervorgehoben.
+- Drehen repariert: dreht sich wieder von selbst, pausiert beim Ziehen/Zoomen und startet nach 6 s wieder;
+  steht still, solange eine Region rechts geöffnet ist. Knopf „Pause / Rotate“ oben rechts.
+- Trend-Markierungen auf der Kugel: jede Studienregion zeigt die Änderung der Bodenfeuchte seit 2000
+  (orange = trockener, blau = feuchter, grau = kein klarer Trend); signifikante Trends pulsieren.
+  Klick auf eine Markierung öffnet die Region. Ein Bogen verbindet den „Mirror Trend“ Ungarn ↔ NW-China.
+- Neue Studienregionen mit GLDAS-Giovanni-Daten (14 CSVs): NW China (Tianshan), Southern Sweden,
+  Northern Scotland, Sahel. Damit läuft „Compare regions“ Ungarn vs. NW-China live → MIRROR TREND.
+- Giovanni-Boxen bekommen den Namen der Studienregion statt „Giovanni box W,S,E,N“.
+- Neuer Endpunkt /api/highlights (wird beim Start vorberechnet).

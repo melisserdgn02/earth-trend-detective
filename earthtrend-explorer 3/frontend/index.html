@@ -43,7 +43,8 @@
     <div id="globe"></div>
     <div class="globe-tools">
       <button id="toggle-notes" class="ghost" aria-controls="notebook" aria-expanded="false">☰ Findings</button>
-      <button id="toggle-overview" class="ghost" aria-controls="overview-panel" aria-expanded="false">Overview ›</button>
+      <span class="tools-right"><button id="rotate-btn" class="ghost" type="button" aria-pressed="false">❚❚ Pause</button>
+      <button id="toggle-overview" class="ghost" aria-controls="overview-panel" aria-expanded="false">Overview ›</button></span>
     </div>
     <div id="welcome" class="globe-caption">
       <p>Click a country to explore its climate.</p>
@@ -53,7 +54,15 @@
       </div>
     </div>
     <div class="globe-hud">
-      <div class="drag-help">Drag to rotate · Scroll to zoom</div>
+      <div class="hud-left">
+        <div id="trend-legend" class="trend-legend hidden">
+          <b>Soil-moisture trend since 2000</b>
+          <div class="legend-row"><span class="dot dry"></span>drying <span class="dot wet"></span>getting wetter <span class="dot none"></span>no clear trend</div>
+          <div class="legend-row"><span class="pulse"></span>pulsing = statistically significant · arc = mirror trend</div>
+          <small class="legend-src"></small>
+        </div>
+        <div class="drag-help">Drag to rotate · Scroll to zoom · Click a marker or country</div>
+      </div>
       <details class="scan"><summary>Globe scan</summary>
         <select id="scan-var" aria-label="Variable for the globe scan"></select>
         <button id="scan-btn">Scan the globe</button>

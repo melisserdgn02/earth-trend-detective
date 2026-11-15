@@ -476,6 +476,38 @@ def health():
     return {"status": "ok", "warm": _warm["done"], "cached_results": len(_cache)}
 
 
+# ---------------------------------------------------------------- globe highlights
+HIGHLIGHT_VARS = ("RootMoist",)  # the study's headline variable: root-zone soil moisture
+
+
+@app.get("/api/highlights")
+@cached
+def highlights():
+    """Soil-moisture trend for every bundled Giovanni study box, for the markers on the globe."""
+    import json
+    out, seen = [], set()
+    for g in giovanni_csv.load_all():
+        b = g.get("bbox")
+        if not b or g.get("series") is None or not any(v in g.get("id", "") for v in HIGHLIGHT_VARS):
+            continue
+        rid = f"g-{b[0]:g}_{b[1]:g}_{b[2]:g}_{b[3]:g}"
+        if rid in seen:
+            continue
+        seen.add(rid)
+        try:
+            sm = json.loads(summary(rid=rid).body)
+        except Exception:
+            continue
+        v = next((x for x in sm["variables"] if any(h in x["id"] for h in HIGHLIGHT_VARS)), None)
+        if not v or not v["stats"].get("ok"):
+            continue
+        st = v["stats"]
+        out.append(dict(id=rid, name=sm["region"]["name"], bbox=b, lat=(b[1] + b[3]) / 2, lng=(b[0] + b[2]) / 2,
+                        variable=v["label"], pct=st.get("pct"), sen_dec=st["sen_dec"], unit=v["unit"],
+                        verdict=st["verdict"], period=f"{st['start'][:4]}–{st['end'][:4]}"))
+    return J(dict(variable="Root-zone soil moisture", source="NASA GLDAS Noah v2.1 via Giovanni", items=out))
+
+
 # ---------------------------------------------------------------- warm-up
 # Precompute the bundled study areas right after start-up, so the demo buttons answer at once
 # even on a slow free server that has just woken up.
@@ -500,6 +532,7 @@ def _warm_up():
                     variable(rid=rid, vid=vid)
             except Exception as e:  # never let warm-up break the site
                 print(f"warm-up {rid}: {type(e).__name__}: {e}")
+        highlights()
     finally:
         _warm["done"] = True
 

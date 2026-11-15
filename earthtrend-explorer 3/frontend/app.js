@@ -131,30 +131,98 @@ function initGlobe(topo, profiles) {
     selectRegion({ id: "c-" + slug(feature.properties.name), name: feature.properties.name, kind: "country" });
   };
   try {
+    // NASA Blue Marble imagery with country outlines on top; study areas pulse with their trend.
     globe = Globe({ animateIn: false })(el)
       .backgroundColor("rgba(0,0,0,0)")
-      .showAtmosphere(true).atmosphereColor("#68b9ff").atmosphereAltitude(0.11)
+      .globeImageUrl("/static/textures/earth-blue-marble.jpg")
+      .bumpImageUrl("/static/textures/earth-topology.jpg")
+      .showAtmosphere(true).atmosphereColor("#7cc4ff").atmosphereAltitude(0.17)
       .polygonsData(S.features)
       .polygonCapColor(capColor)
-      .polygonSideColor(() => "rgba(20,40,70,0.55)")
-      .polygonStrokeColor((f) => (isSelected(f) ? "#ffffff" : "#426fa2"))
-      .polygonAltitude((f) => (isSelected(f) ? 0.035 : 0.006))
+      .polygonSideColor(() => "rgba(0,0,0,0)")
+      .polygonStrokeColor((f) => (isSelected(f) ? "#ffffff" : "rgba(235,245,255,0.30)"))
+      .polygonAltitude((f) => (isSelected(f) ? 0.02 : 0.004))
       .polygonsTransitionDuration(300)
       .onPolygonHover(onHover)
       .onPolygonClick(pickCountry)
       .pointsData([]).pointLat("lat").pointLng("lng").pointColor(() => "#ffd27a").pointAltitude(0.012).pointRadius(0.16)
-      .pointLabel((p) => `POWER grid point ${p.lat}°, ${p.lng}°`);
-    const mat = globe.globeMaterial();
-    mat.color.set("#0b2446"); if (mat.emissive) mat.emissive.set("#04101f"); mat.shininess = 6;
+      .pointLabel((p) => `POWER grid point ${p.lat}°, ${p.lng}°`)
+      .ringsData([]).ringLat("lat").ringLng("lng").ringAltitude(0.006)
+      .ringColor((h) => (t) => trendRGBA(h, 1 - t)).ringMaxRadius((h) => (h.verdict === "PROVEN" ? 6 : 3))
+      .ringPropagationSpeed(2).ringRepeatPeriod((h) => (h.verdict === "PROVEN" ? 1300 : 2600))
+      .htmlElementsData([]).htmlLat("lat").htmlLng("lng").htmlAltitude(0.03).htmlElement(markerEl)
+      .arcsData([]).arcColor("colors").arcStroke(0.6).arcAltitudeAutoScale(0.35)
+      .arcDashLength(0.35).arcDashGap(0.15).arcDashAnimateTime(2600);
   } catch {
-    globe = canvasGlobe(el, { color: capColor, selected: isSelected, hover: onHover, select: pickCountry });
+    globe = canvasGlobe(el, { color: (f) => { const c = capColor(f); return c === "rgba(0,0,0,0)" || c.startsWith("rgba(255,255,255") ? "#244f7c" : c; },
+                              selected: isSelected, hover: onHover, select: pickCountry });
     globe.polygonsData(S.features);
   }
   globe.pointOfView({ lat: 30, lng: 10, altitude: 1.37 });
   const ro = new ResizeObserver(() => globe.width(el.clientWidth).height(el.clientHeight));
   ro.observe(el);
-  globe.controls().autoRotate = !matchMedia("(prefers-reduced-motion: reduce)").matches; globe.controls().autoRotateSpeed = 0.35;
-  el.addEventListener("pointerdown", () => (globe.controls().autoRotate = false));
+  setupRotation(el);
+}
+// The globe turns slowly by itself. It pauses while you drag or zoom, and starts again after
+// a few seconds, unless a region is open in the side panel or you pressed "Pause".
+function setupRotation(el) {
+  const btn = $("#rotate-btn");
+  const ctl = globe.controls();
+  ctl.autoRotateSpeed = 0.4;
+  S.rotateOn = true;
+  let idle;
+  const apply = () => {
+    const focused = S.region && !$("#overview-panel").classList.contains("hidden");
+    ctl.autoRotate = S.rotateOn && !S.userBusy && !focused;
+    btn.textContent = S.rotateOn ? "❚❚ Pause" : "⟳ Rotate";
+    btn.setAttribute("aria-pressed", String(!S.rotateOn));
+  };
+  const busy = () => { S.userBusy = true; apply(); clearTimeout(idle); idle = setTimeout(() => { S.userBusy = false; apply(); }, 6000); };
+  el.addEventListener("pointerdown", busy);
+  el.addEventListener("wheel", busy, { passive: true });
+  btn.onclick = () => { S.rotateOn = !S.rotateOn; if (S.rotateOn) S.userBusy = false; apply(); };
+  S.applyRotation = apply;
+  apply();
+}
+
+// ---------------------------------------------------------------- study-area markers (trend layer)
+function trendRGBA(h, a) {
+  if (h.verdict !== "PROVEN" && h.verdict !== "SUSPICIOUS") return `rgba(200,210,225,${0.55 * a})`;
+  return h.sen_dec < 0 ? `rgba(255,140,66,${a})` : `rgba(77,200,255,${a})`;
+}
+function shortName(n) { return n.replace(/\s*\(.*\)\s*/, "").replace(" study box", ""); }
+function markerEl(h) {
+  const el = document.createElement("button");
+  el.type = "button";
+  el.className = `trend-marker side-${h.side || "right"} ${h.sen_dec < 0 ? "dry" : "wet"}${h.verdict === "PROVEN" ? " sig" : h.verdict === "SUSPICIOUS" ? " maybe" : ""}`;
+  const pct = h.pct !== null && isFinite(h.pct) ? `${fsig(h.pct, 2)} %` : `${fsig(h.sen_dec)}/dec`;
+  el.innerHTML = `<i></i><b>${esc(pct)}</b><span>${esc(shortName(h.name))}</span>`;
+  el.title = `${h.name}: root-zone soil moisture ${pct} (${h.period}) · ${friendly(h.verdict)}. Click to open.`;
+  el.onclick = (e) => { e.stopPropagation(); selectRegion({ id: h.id, name: h.name, label: h.name, kind: "box", bbox: h.bbox }); };
+  // globe.gl positions the outer element with its own CSS transform; the label moves inside it.
+  const anchor = document.createElement("div");
+  anchor.className = "trend-anchor";
+  anchor.append(el);
+  return anchor;
+}
+async function loadHighlights() {
+  try {
+    const d = await api("/api/highlights", { timeout: 180000 });
+    S.highlights = d.items || [];
+    // Labels of nearby study areas would overlap: put the more western one's label on the left.
+    for (const h of S.highlights) {
+      h.side = S.highlights.some((o) => o !== h && Math.abs(o.lat - h.lat) < 8 && Math.abs(o.lng - h.lng) < 25 && o.lng > h.lng) ? "left" : "right";
+    }
+    if (!S.highlights.length || typeof globe.ringsData !== "function") return;
+    globe.ringsData(S.highlights).htmlElementsData(S.highlights);
+    // The mirror trend: one region drying, another getting wetter, both significant.
+    const dry = S.highlights.filter((h) => h.verdict === "PROVEN" && h.sen_dec < 0).sort((a, b) => a.pct - b.pct)[0];
+    const wet = S.highlights.filter((h) => h.verdict === "PROVEN" && h.sen_dec > 0).sort((a, b) => b.pct - a.pct)[0];
+    if (dry && wet) globe.arcsData([{ startLat: dry.lat, startLng: dry.lng, endLat: wet.lat, endLng: wet.lng,
+                                      colors: ["rgba(255,140,66,0.95)", "rgba(77,200,255,0.95)"] }]);
+    $("#trend-legend").classList.remove("hidden");
+    $("#trend-legend .legend-src").textContent = `${d.variable} · ${d.source}`;
+  } catch { /* markers are optional */ }
 }
 function isSelected(f) {
   if (!S.region) return false;
@@ -163,18 +231,20 @@ function isSelected(f) {
 }
 function capColor(f) {
   if (f.properties.isBox) return "rgba(255,236,140,0.45)";
-  if (isSelected(f)) return "#ffe76a";
+  if (isSelected(f)) return "rgba(255,231,106,0.42)";
   const id = "c-" + slug(f.properties.name);
   if (S.scan && S.scan.results && S.scan.results[id]) {
     const r = S.scan.results[id];
     let c = diverging(r.sen_dec, S.scan.lim);
     if (r.verdict === "NO TREND") c = lerpColor(c.slice(1), "1b2b47", 0.65);
     else if (r.verdict === "SUSPICIOUS") c = lerpColor(c.slice(1), "1b2b47", 0.3);
-    return c;
+    return c + "d0";
   }
-  return "#244f7c";
+  if (f === S.hoverFeature) return "rgba(255,255,255,0.16)";
+  return "rgba(0,0,0,0)";
 }
 function onHover(f) {
+  if (S.hoverFeature !== f) { S.hoverFeature = f; if (globe && globe.polygonCapColor) globe.polygonCapColor(capColor); }
   const tip = $("#hover-tip");
   if (!f) { tip.classList.add("hidden"); return; }
   const id = "c-" + slug(f.properties.name || "");
@@ -200,7 +270,7 @@ function flyTo(b) {
   let lng = (w + e) / 2; const lat = (s + n) / 2;
   const span = Math.max(e - w, n - s);
   if (e - w > 300) lng = 0; // antimeridian-spanning countries (Russia, Fiji, USA)
-  globe.controls().autoRotate = false;
+  if (S.applyRotation) S.applyRotation();
   globe.pointOfView({ lat, lng, altitude: Math.min(1.7, Math.max(1.25, span / 16)) }, 1200);
 }
 
@@ -248,6 +318,7 @@ function setSidebar(side, open) {
   panel.classList.toggle("hidden", !open);
   trigger.setAttribute("aria-expanded", open);
   trigger.classList.toggle("invisible", open);
+  if (S.applyRotation) S.applyRotation();
   resizePlots();
 }
 
@@ -951,6 +1022,7 @@ async function boot() {
   $("#scan-var").innerHTML = Object.entries(S.meta.variables).map(([k, v]) => `<option value="${k}">${esc(v.label)}</option>`).join("");
   renderMethod();
   initGlobe(topo, profiles);
+  loadHighlights();
   setupSearch($("#search"), $("#search-results"), selectRegion);
   $$(".example").forEach((b) => b.addEventListener("click", async () => {
     try {

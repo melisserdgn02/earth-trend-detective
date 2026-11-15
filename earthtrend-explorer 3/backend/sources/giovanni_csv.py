@@ -123,7 +123,9 @@ def load_all() -> list[dict]:
         if "bbox" in g and g["bbox"]:
             w, s, e, n = g["bbox"]
             try:
-                R.register(R.box_region(g["bbox"], name=f"Giovanni box {w:g},{s:g},{e:g},{n:g}",
+                # use the study-area name when the box is one of our presets
+                named = next((k for k, b in R.PRESETS.items() if all(abs(x - y) < 1e-6 for x, y in zip(b, g["bbox"]))), None)
+                R.register(R.box_region(g["bbox"], name=named or f"Giovanni box {w:g},{s:g},{e:g},{n:g}",
                                         rid=f"g-{w:g}_{s:g}_{e:g}_{n:g}"))
             except ValueError:
                 pass

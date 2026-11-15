@@ -534,3 +534,32 @@ body.resizing .panel { transition: none; }
 }
 .caption-actions { display: flex; gap: 8px; justify-content: center; flex-wrap: wrap; }
 .globe-caption .example.ghost { background: transparent; }
+
+/* ---------- globe: NASA imagery + trend markers */
+.globe-wrap { background: radial-gradient(ellipse at 50% 46%, #0d2442 0%, #071226 55%, #03070f 100%); }
+.globe-wrap::after { opacity: .28; }
+.tools-right { display: flex; gap: 6px; }
+.globe-tools .tools-right button { pointer-events: auto; }
+.hud-left { display: flex; flex-direction: column; gap: 8px; align-items: flex-start; }
+.trend-legend { background: #06142ad9; border: 1px solid var(--line2); border-radius: 12px; padding: 9px 12px; font-size: 12px; color: var(--muted); max-width: 330px; pointer-events: auto; }
+.trend-legend b { color: var(--text); font-size: 12.5px; }
+.trend-legend .legend-row { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: 5px; }
+.trend-legend small { display: block; margin-top: 5px; color: var(--dim); font-size: 10.5px; }
+.trend-legend .dot { width: 10px; height: 10px; }
+.dot.dry { background: #ff8c42; } .dot.wet { background: #4dc8ff; } .dot.none { background: #c8d2e1; opacity: .6; }
+.trend-legend .pulse { width: 12px; height: 12px; border-radius: 50%; border: 2px solid #ff8c42; box-shadow: 0 0 0 3px #ff8c4233; }
+.trend-anchor { width: 0; height: 0; position: relative; overflow: visible; }
+.trend-marker { position: absolute; left: 0; top: 0; pointer-events: auto; cursor: pointer; display: inline-flex; align-items: center; gap: 6px; transform: translate(-12px, -50%);
+  background: #061428e6; border: 1px solid #ffffff40; border-radius: 999px; padding: 4px 10px 4px 6px; color: #fff;
+  font: 600 12px/1.1 var(--sans); white-space: nowrap; box-shadow: 0 4px 14px #0009; }
+.trend-marker:hover { border-color: #fff; filter: brightness(1.15); }
+.trend-marker i { width: 10px; height: 10px; border-radius: 50%; background: #c8d2e1; flex: none; }
+.trend-marker.dry i { background: #ff8c42; } .trend-marker.wet i { background: #4dc8ff; }
+.trend-marker:not(.sig):not(.maybe) i { background: #c8d2e1; opacity: .7; }
+.trend-marker b { font-variant-numeric: tabular-nums; }
+.trend-marker.sig.dry b { color: #ffb07a; } .trend-marker.sig.wet b { color: #8fdcff; }
+.trend-marker span { font-weight: 500; color: #d5e2f0; }
+@media (max-width: 700px) { .trend-marker span { display: none; } .trend-legend { display: none; } }
+.trend-marker.side-left { transform: translate(calc(-100% + 12px), -50%); flex-direction: row-reverse; padding: 4px 6px 4px 10px; }
+.trend-marker.side-right:not(:only-child) { }
+.trend-legend .legend-row:nth-of-type(2) { flex-wrap: nowrap; }

@@ -8,7 +8,7 @@ function canvasGlobe(element, options) {
   const projection = d3.geoOrthographic().clipAngle(90).precision(1);
   const path = d3.geoPath(projection, ctx);
   const grid = d3.geoGraticule10();
-  const settings = { autoRotate: false, autoRotateSpeed: .35 };
+  const settings = { autoRotate: true, autoRotateSpeed: .35 };
   let features = [], points = [], hovered = null, drag = null, target = null;
   let width = 1, height = 1, lat = 30, lng = 10, altitude = 1.37, last = 0;
   let radius = 1;
@@ -126,6 +126,10 @@ function canvasGlobe(element, options) {
       else { ({ lat, lng, altitude } = view); draw(); }
       return this;
     },
+    ringsData() { return this; },
+    htmlElementsData() { return this; },
+    arcsData() { return this; },
+    polygonCapColor() { draw(); return this; },
     width(value) { width = Math.max(value, 1); return this; },
     height(value) { height = Math.max(value, 1); resize(); return this; },
   };
