@@ -2,6 +2,8 @@
 from __future__ import annotations
 import os
 import threading
+from collections import OrderedDict
+from dataclasses import dataclass
 
 import pandas as pd
 
@@ -11,11 +13,31 @@ from .sources import power, giovanni_csv, demo
 DEMO = os.environ.get("TREND_GLOBE_DEMO", "0") == "1"
 POINT_CAP = int(os.environ.get("POINT_CAP", "8"))   # countries (also used by the globe scan)
 BOX_CAP = int(os.environ.get("BOX_CAP", "16"))      # study boxes / Giovanni boxes / points: denser, closer to Giovanni
-_mem: dict = {}
+_MAX_REGIONS = 32
+
+
+@dataclass(eq=False, frozen=True, slots=True)
+class RegionSnapshot:
+    """One version of a region's data, shared by readers."""
+
+    frame: pd.DataFrame
+    labels: dict
+    units: dict
+    pct_ok: dict
+    info: dict
+
+
+_mem: OrderedDict[str, RegionSnapshot] = OrderedDict()
 _lock = threading.Lock()
+_generation = 0
 
 
 def region_data(rid: str):
+    snapshot = region_snapshot(rid)
+    return snapshot.frame, snapshot.labels, snapshot.units, snapshot.pct_ok, snapshot.info
+
+
+def region_snapshot(rid: str) -> RegionSnapshot:
     """Return a data frame with explicit provenance.
 
     Giovanni boxes use their exact, area-averaged Giovanni series as the source.
@@ -25,7 +47,9 @@ def region_data(rid: str):
     """
     region = R.get(rid)
     with _lock:
+        generation = _generation
         if rid in _mem:
+            _mem.move_to_end(rid)
             return _mem[rid]
     gfiles = [g for g in giovanni_csv.for_region(region) if g.get("series") is not None]
     only_giovanni = rid.startswith("g-") and len(gfiles) > 0
@@ -72,12 +96,18 @@ def region_data(rid: str):
                 demo=DEMO and bool(info.get("synthetic")), power_warning=power_warning,
                 source_type="Giovanni CSV" if not info["power_used"] else
                             ("NASA POWER + Giovanni CSV" if attached else "NASA POWER"))
-    out = (df.sort_index(), labels, units, pct_ok, info)
+    snapshot = RegionSnapshot(df.sort_index(), labels, units, pct_ok, info)
     with _lock:
-        _mem[rid] = out
-    return out
+        if generation == _generation:
+            snapshot = _mem.setdefault(rid, snapshot)
+            _mem.move_to_end(rid)
+            if len(_mem) > _MAX_REGIONS:
+                _mem.popitem(last=False)
+    return snapshot
 
 
 def clear():
+    global _generation
     with _lock:
+        _generation += 1
         _mem.clear()
