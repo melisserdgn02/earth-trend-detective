@@ -10,6 +10,7 @@ import os
 import re
 import threading
 import time
+from functools import lru_cache
 from pathlib import Path
 
 import numpy as np
@@ -62,9 +63,14 @@ def _parse_exclude(ex: str | None):
 
 
 def _load(rid):
+    snapshot = _load_snapshot(rid)
+    return snapshot.frame, snapshot.labels, snapshot.units, snapshot.pct_ok, snapshot.info
+
+
+def _load_snapshot(rid):
     giovanni_csv.load_all()  # registers Giovanni boxes as regions
     try:
-        return data.region_data(rid)
+        return data.region_snapshot(rid)
     except KeyError:
         raise HTTPException(404, f"unknown region {rid}")
     except power.PowerError as e:
@@ -110,14 +116,20 @@ def region(rid: str):
 
 
 # ---------------------------------------------------------------- per-variable trends
+@lru_cache(maxsize=128)
+def _analyse(snapshot: data.RegionSnapshot, vid, start, end, exclude, detail):
+    return TR.analyse(snapshot.frame[vid], start, end, exclude, snapshot.pct_ok.get(vid, True), detail=detail)
+
+
 @app.get("/api/region/{rid}/summary")
 def summary(rid: str, start: int | None = None, end: int | None = None, exclude: str | None = None):
-    df, labels, units, pct_ok, info = _load(rid)
-    ex = _parse_exclude(exclude)
+    snapshot = _load_snapshot(rid)
+    df, labels, units, pct_ok, info = snapshot.frame, snapshot.labels, snapshot.units, snapshot.pct_ok, snapshot.info
+    ex = tuple(_parse_exclude(exclude) or ())
     res = {}
     for c in df.columns:
         try:
-            res[c] = TR.analyse(df[c], start, end, ex, pct_ok.get(c, True))
+            res[c] = _analyse(snapshot, c, start, end, ex, False).copy()
         except Exception as e:
             res[c] = dict(ok=False, reason=f"{type(e).__name__}: {e}")
     # FDR across the variables of this region, on the stricter of the two main p-values
@@ -145,10 +157,12 @@ def summary(rid: str, start: int | None = None, end: int | None = None, exclude:
 
 @app.get("/api/region/{rid}/variable/{vid}")
 def variable(rid: str, vid: str, start: int | None = None, end: int | None = None, exclude: str | None = None):
-    df, labels, units, pct_ok, info = _load(rid)
-    if vid not in df.columns:
+    snapshot = _load_snapshot(rid)
+    if vid not in snapshot.frame.columns:
         raise HTTPException(404, vid)
-    r = TR.analyse(df[vid], start, end, _parse_exclude(exclude), pct_ok.get(vid, True), detail=True)
+    labels, units, pct_ok = snapshot.labels, snapshot.units, snapshot.pct_ok
+    ex = tuple(_parse_exclude(exclude) or ())
+    r = _analyse(snapshot, vid, start, end, ex, True).copy()
     if r.get("ok"):
         r["sentence"] = N.trend_sentence(labels[vid], r, N.unit(units.get(vid)), pct_ok.get(vid, True))
     return J(dict(id=vid, label=labels[vid], unit=N.unit(units.get(vid)), stats=r,
@@ -384,6 +398,7 @@ async def upload(file: UploadFile = File(...)):
         dest.unlink(missing_ok=True)
         raise HTTPException(400, str(e))
     data.clear()
+    _analyse.cache_clear()
     w, s, e, n = g["bbox"] if g["bbox"] else (None,) * 4
     rid = f"g-{w:g}_{s:g}_{e:g}_{n:g}" if g["bbox"] else None
     giovanni_csv.load_all()
